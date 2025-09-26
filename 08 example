@@ -1,0 +1,90 @@
+// Arduino pin assignment
+#define PIN_LED  9
+#define PIN_TRIG 12   // sonar sensor TRIGGER
+#define PIN_ECHO 13   // sonar sensor ECHO
+
+// configurable parameters
+#define SND_VEL 346.0     // sound velocity at 24 celsius degree (unit: m/sec)
+#define INTERVAL 25       // sampling interval (unit: msec)
+#define PULSE_DURATION 10 // ultra-sound Pulse Duration (unit: usec)
+#define _DIST_MIN 100.0   // minimum distance to be measured (unit: mm)
+#define _DIST_MAX 300.0   // maximum distance to be measured (unit: mm)
+
+#define TIMEOUT ((INTERVAL / 2) * 1000.0) // maximum echo waiting time (unit: usec)
+#define SCALE (0.001 * 0.5 * SND_VEL)     // coefficent to convert duration to distance
+
+unsigned long last_sampling_time = 0;   // unit: msec
+
+// --- Forward declarations ---
+static float measure_distance_mm();
+static int duty_from_distance_mm(float d_mm);
+
+void setup() {
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
+
+  digitalWrite(PIN_TRIG, LOW); // idle low
+
+  // Serial Plotter 용
+  Serial.begin(57600);
+}
+
+void loop() {
+  const unsigned long now = millis();
+  if (now - last_sampling_time >= INTERVAL) {
+    last_sampling_time = now;
+
+    // 1) 거리 측정 (mm)
+    float dist = measure_distance_mm(); // 실제 측정값 (범위를 벗어날 수 있음)
+
+    // 2) 과제의 밝기 규칙에 맞춰 duty 계산 (active-low)
+    int duty = duty_from_distance_mm(dist);
+
+    // 3) PWM 출력
+    analogWrite(PIN_LED, duty);
+
+    // 4) Serial Plotter 확인용 (여러 series 지원: 탭 구분)
+    Serial.print("dist_mm:\t"); Serial.print(dist, 1);
+    Serial.print("\tPWM:\t");     Serial.println(duty);
+  }
+
+  // delay(50);  // 실습3 요구: 삭제 (샘플링 주기는 INTERVAL로만 제어)
+}
+
+// 초음파 센서 거리(mm) 측정
+static float measure_distance_mm() {
+  // 트리거 펄스 발생
+  digitalWrite(PIN_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_TRIG, HIGH);
+  delayMicroseconds(PULSE_DURATION);
+  digitalWrite(PIN_TRIG, LOW);
+
+  // 왕복 시간(us)을 읽고 -> 편도거리(mm)로 변환
+  unsigned long dur_us = pulseIn(PIN_ECHO, HIGH, (unsigned long)TIMEOUT);
+  return (float)dur_us * SCALE; // 단위: mm
+}
+
+// 과제 조건의 "삼각형" 밝기 함수 (active-low: 0=최대 밝기, 255=꺼짐)
+static int duty_from_distance_mm(float d) {
+  // 범위를 벗어나면 최소 밝기(꺼짐)
+  if (d <= _DIST_MIN || d >= _DIST_MAX) return 255;
+
+  // 100~200mm: 선형으로 255 -> 0 (꺼짐 -> 최밝음)
+  if (d <= 200.0f) {
+    float t = (d - _DIST_MIN) / (200.0f - _DIST_MIN); // 0~1
+    float val = 255.0f * (1.0f - t);                  // 255 -> 0
+    int duty = (int)(val + 0.5f);
+    // 150mm에서 50% 확인(=127~128 부근)
+    return duty;
+  }
+  // 200~300mm: 선형으로 0 -> 255 (최밝음 -> 꺼짐)
+  else {
+    float t = (d - 200.0f) / (_DIST_MAX - 200.0f);    // 0~1
+    float val = 255.0f * t;                           // 0 -> 255
+    int duty = (int)(val + 0.5f);
+    // 250mm에서 50% 확인(=127~128 부근)
+    return duty;
+  }
+}
