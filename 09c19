@@ -1,0 +1,166 @@
+#define PIN_LED   9
+#define PIN_TRIG 12
+#define PIN_ECHO 13
+
+#define SND_VEL 346.0
+#define INTERVAL 25
+#define PULSE_DURATION 10
+
+#define _DIST_MIN 100     // mm (10 cm)
+#define _DIST_MAX 300     // mm (30 cm)
+
+#define TIMEOUT ((INTERVAL / 2) * 1000.0)
+#define SCALE   (0.001 * 0.5 * SND_VEL)
+
+#define _EMA_ALPHA 0.5
+
+#define MAX_MEDIAN_N 25
+#define MEDIAN_N     3    // <-- even or odd both OK
+
+#if (MEDIAN_N < 3) || (MEDIAN_N > MAX_MEDIAN_N)
+#error "MEDIAN_N must be between 3 and MAX_MEDIAN_N"
+#endif
+
+// Plotter mode: only numeric data lines
+#define PLOTTER_MODE 1
+
+unsigned long last_sampling_time = 0;
+float dist_ema = 0.0f;
+float prev_valid_raw = _DIST_MIN;   // initialize with safe value in range
+
+float ring[MAX_MEDIAN_N];
+int   ring_idx = 0;
+int   ring_filled = 0;
+int   medianN = MEDIAN_N;
+
+static inline float clamp_out(float v) {
+  const float cap = _DIST_MAX + 100.0f;   // a little headroom
+  return (v > cap) ? cap : v;
+}
+
+// Sensor read (mm). On timeout, return 0.
+float USS_measure(int TRIG, int ECHO) {
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(PULSE_DURATION);
+  digitalWrite(TRIG, LOW);
+  unsigned long dur = pulseIn(ECHO, HIGH, TIMEOUT);
+  if (dur == 0UL) return 0.0f;
+  return (float)dur * SCALE;
+}
+
+// insertion sort for median
+static void copy_and_sort(const float* src, int n, float* dst) {
+  for (int i = 0; i < n; ++i) dst[i] = src[i];
+  for (int i = 1; i < n; ++i) {
+    float key = dst[i];
+    int j = i - 1;
+    while (j >= 0 && dst[j] > key) {
+      dst[j + 1] = dst[j];
+      --j;
+    }
+    dst[j + 1] = key;
+  }
+}
+
+static float median_of_ring() {
+  int n = (ring_filled < medianN) ? ring_filled : medianN;
+  if (n <= 0) return 0.0f;
+  float tmp[MAX_MEDIAN_N];
+  int start = (ring_idx - n + MAX_MEDIAN_N) % MAX_MEDIAN_N;
+  for (int i = 0; i < n; ++i) {
+    int idx = (start + i) % MAX_MEDIAN_N;
+    tmp[i] = ring[idx];
+  }
+  copy_and_sort(tmp, n, tmp);
+  if (n % 2 == 1) {
+    return tmp[n / 2];
+  } else {
+    // average of the two middle values
+    return 0.5f * (tmp[n / 2 - 1] + tmp[n / 2]);
+  }
+}
+
+// Runtime command: N=10 (any integer 3..MAX_MEDIAN_N). No echo in plotter mode.
+void maybe_parse_runtime_N() {
+  if (!Serial.available()) return;
+  String line = Serial.readStringUntil('\n');
+  line.trim();
+  if (line.startsWith("N=") || line.startsWith("n=")) {
+    int val = line.substring(2).toInt();
+    if (val >= 3 && val <= MAX_MEDIAN_N) {
+      medianN = val;
+      ring_idx = 0;
+      ring_filled = 0;
+      for (int i = 0; i < MAX_MEDIAN_N; ++i) ring[i] = 0.0f;
+#if !PLOTTER_MODE
+      Serial.print("Median window updated to N="); Serial.println(medianN);
+#endif
+    } else {
+#if !PLOTTER_MODE
+      Serial.println("Invalid N. Use integer 3..MAX_MEDIAN_N (e.g., N=6, N=7, N=10).");
+#endif
+    }
+  }
+}
+
+void setup() {
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
+  digitalWrite(PIN_TRIG, LOW);
+
+  Serial.begin(57600);
+  delay(1000);                 // ensure USB CDC is ready (prevents label duplication)
+  Serial.setTimeout(10);
+  while (Serial.available() > 0) { (void)Serial.read(); }
+
+  // First clean header line to lock legend
+  Serial.print("Min:");    Serial.print(_DIST_MIN);
+  Serial.print(",raw:");   Serial.print(0);
+  Serial.print(",ema:");   Serial.print(0);
+  Serial.print(",median:");Serial.print(0);
+  Serial.print(",Max:");   Serial.print(_DIST_MAX);
+  Serial.println("");
+
+  for (int i = 0; i < MAX_MEDIAN_N; ++i) ring[i] = 0.0f;
+  dist_ema = 0.0f;
+  prev_valid_raw = _DIST_MIN;
+}
+
+void loop() {
+  if (millis() < last_sampling_time + INTERVAL) {
+    maybe_parse_runtime_N();
+    return;
+  }
+  last_sampling_time += INTERVAL;
+
+  // 1) Read raw (mm)
+  float dist_raw = USS_measure(PIN_TRIG, PIN_ECHO);
+
+  // 2) RAW gate: if outside 100~300 mm or 0, use previous valid raw
+  if ((dist_raw < _DIST_MIN) || (dist_raw > _DIST_MAX) || (dist_raw == 0.0f)) {
+    dist_raw = prev_valid_raw;
+  } else {
+    prev_valid_raw = dist_raw;
+  }
+
+  // 3) EMA over gated raw
+  dist_ema = _EMA_ALPHA * dist_raw + (1.0f - _EMA_ALPHA) * dist_ema;
+
+  // 4) Median over gated raw
+  ring[ring_idx] = dist_raw;
+  ring_idx = (ring_idx + 1) % MAX_MEDIAN_N;
+  if (ring_filled < MAX_MEDIAN_N) ring_filled++;
+  float dist_median = median_of_ring();
+
+  // 5) Serial Plotter line
+  Serial.print("Min:");     Serial.print(_DIST_MIN);
+  Serial.print(",raw:");    Serial.print(clamp_out(dist_raw));
+  Serial.print(",ema:");    Serial.print(clamp_out(dist_ema));
+  Serial.print(",median:"); Serial.print(clamp_out(dist_median));
+  Serial.print(",Max:");    Serial.print(_DIST_MAX);
+  Serial.println("");
+
+  // Optional LED indicator
+  digitalWrite(PIN_LED, (prev_valid_raw < _DIST_MIN || prev_valid_raw > _DIST_MAX) ? HIGH : LOW);
+}
