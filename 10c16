@@ -1,0 +1,60 @@
+#include <Servo.h>
+
+#define TRIG 12
+#define ECHO 13
+#define SERVO_PIN 10
+
+#define DETECT_DIST 300   // 30cm
+#define OPEN_ANGLE 0
+#define CLOSE_ANGLE 90
+#define MOVE_TIME 2000    // 열고 닫는 시간(ms)
+#define HOLD_TIME 5000    // 열린 상태 유지(ms)
+
+Servo gate;
+
+// 초음파 거리(mm)
+long getDistance() {
+  digitalWrite(TRIG, LOW);  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+  unsigned long us = pulseIn(ECHO, HIGH, 30000UL); // µs
+  if (us == 0) return -1;
+  double m = (us * 1e-6) * 343.0 / 2.0;
+  return (long)(m * 1000.0); // mm
+}
+
+// 3차 smoothstep: 3t^2 - 2t^3 (0~1 → 0~1)
+double ease(double t) {
+  return t*t*(3.0 - 2.0*t);
+}
+
+// start→end를 MOVE_TIME 동안 부드럽게 이동
+void moveServo(int start, int end, int time_ms) {
+  const int steps = 50;
+  for (int i = 0; i <= steps; ++i) {
+    double t = (double)i / (double)steps; // 0~1
+    double s = ease(t);                   // smoothstep
+    int ang = (int)(start + (end - start) * s + 0.5);
+    gate.write(ang);
+    delay(time_ms / steps);
+  }
+}
+
+void setup() {
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+  gate.attach(SERVO_PIN);
+  gate.write(CLOSE_ANGLE);
+}
+
+void loop() {
+  long d = getDistance();
+  if (d > 0 && d <= DETECT_DIST) {
+    moveServo(CLOSE_ANGLE, OPEN_ANGLE, MOVE_TIME);
+    delay(HOLD_TIME);
+    moveServo(OPEN_ANGLE, CLOSE_ANGLE, MOVE_TIME);
+    delay(1000); // 재트리거 방지
+  } else {
+    delay(100);
+  }
+}
